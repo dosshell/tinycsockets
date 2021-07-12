@@ -21,6 +21,7 @@
  */
 
 #include "tinycsocket.h"
+#include "tinyulist.h"
 
 #ifdef TINYCSOCKET_USE_WIN32_IMPL
 
@@ -59,6 +60,8 @@
 // Forwards declaration due to winver dispatch
 // We will dispatch at lib_init() which OS functions to call depending on OS support
 
+TDS_ULIST_IMPL(SOCKET, soc);
+
 // TODO(markusl): implement native poll
 struct tcs_pollfd
 {
@@ -74,13 +77,6 @@ struct tcs_fd_set
     SOCKET fd_array[1]; // dynamic memory hack that is compatible with Win32 API fd_set
 };
 
-struct tcs_fd_set_vector
-{
-    size_t capacity;
-    size_t count;
-    SOCKET* data;
-};
-
 struct tcs_usr_data_vector
 {
     SOCKET* key;
@@ -91,14 +87,11 @@ struct tcs_usr_data_vector
 
 struct TcsPool
 {
-    struct tcs_fd_set_vector rfds; // Read
-    struct tcs_fd_set_vector wfds; // Write
-    struct tcs_fd_set_vector efds; // Error
+    UList_soc read_sockets;
+    UList_soc write_sockets;
+    UList_soc error_sockets;
     struct tcs_usr_data_vector user_data;
 };
-
-typedef int(WSAAPI* WSAPoll_type)(struct tcs_pollfd* fdArray, ULONG fds, INT timeout);
-static WSAPoll_type ptr_WSAPoll;
 
 static const size_t TCS_POOL_CAPACITY_STEP = 1024;
 
@@ -258,9 +251,9 @@ TcsReturnCode tcs_lib_init()
             return TCS_ERROR_KERNEL;
 
         // Dispatch best OS functions to call
-        HMODULE lib = GetModuleHandle(TEXT("Ws2_32.dll"));
-        if (lib != NULL)
-            ptr_WSAPoll = (WSAPoll_type)GetProcAddress(lib, "WSAPoll");
+        //HMODULE lib = GetModuleHandle(TEXT("Ws2_32.dll"));
+        //if (lib != NULL)
+        //    ptr_WSAPoll = (WSAPoll_type)GetProcAddress(lib, "WSAPoll");
     }
     ++g_init_count;
     return TCS_SUCCESS;
@@ -272,7 +265,7 @@ TcsReturnCode tcs_lib_free()
     if (g_init_count <= 0)
     {
         WSACleanup();
-        ptr_WSAPoll = NULL;
+        //ptr_WSAPoll = NULL;
     }
     return TCS_SUCCESS;
 }
@@ -495,74 +488,6 @@ TcsReturnCode tcs_receive_from(TcsSocket socket_ctx,
     }
 }
 
-static TcsReturnCode __tcs_fd_set_vector_create(struct tcs_fd_set_vector* set)
-{
-    // TODO(markusl): Reserve alot on 64bit so we can grow without move, also align to pages
-    set->data = malloc(sizeof(SOCKET) * TCS_POOL_CAPACITY_STEP);
-    set->count = 0;
-    set->capacity = TCS_POOL_CAPACITY_STEP;
-    if (set->data == NULL)
-        return TCS_ERROR_MEMORY;
-    return TCS_SUCCESS;
-}
-
-static TcsReturnCode __tcs_fd_set_vector_add(struct tcs_fd_set_vector* set, SOCKET new_socket)
-{
-    if (set == NULL)
-        return TCS_ERROR_INVALID_ARGUMENT;
-
-    if (set->count == set->capacity)
-    {
-        size_t new_capacity = set->capacity + TCS_POOL_CAPACITY_STEP;
-        TcsSocket* new_rfds = realloc(set->data, sizeof(SOCKET) * new_capacity);
-        if (new_rfds == NULL)
-            return TCS_ERROR_MEMORY;
-        set->data = new_rfds;
-        set->capacity = new_capacity;
-    }
-    // TODO(markusl): Implement 64 arrays based on mod
-    //FD_SET is limited to fd_set_size
-    set->data[set->count] = new_socket;
-    set->count++;
-    return TCS_SUCCESS;
-}
-
-static TcsReturnCode __tcs_fd_set_vector_remove(struct tcs_fd_set_vector* set, SOCKET rem_socket)
-{
-    if (set == NULL)
-        return TCS_ERROR_INVALID_ARGUMENT;
-
-    bool found = false;
-    for (size_t i = 0; i < set->count; ++i)
-    {
-        if (set->data[i] == rem_socket)
-        {
-            // replace the rem_socket with the last socket and decrease count
-            // this way we do not need to move half the data (as WinSock2.h does in FD_CLR).
-            set->count--;
-            set->data[i] = set->data[set->count];
-            found = true;
-            break;
-        }
-    }
-    if (found)
-    {
-        bool is_minimum = set->capacity == TCS_POOL_CAPACITY_STEP;
-        bool should_shrink = set->capacity >= set->count + 2 * TCS_POOL_CAPACITY_STEP; // hysteresis
-        if (!is_minimum && should_shrink)
-        {
-            size_t new_capacity = set->capacity - 2 * TCS_POOL_CAPACITY_STEP;
-            TcsSocket* new_block = realloc(set->data, new_capacity);
-            if (new_block == NULL)
-                return TCS_ERROR_MEMORY; // Should not happen since we are shrinking
-
-            set->capacity = new_capacity;
-            set->data = new_block;
-        }
-    }
-    return TCS_SUCCESS;
-}
-
 TcsReturnCode tcs_pool_create(struct TcsPool** pool)
 {
     if (pool == NULL || *pool != NULL)
@@ -572,9 +497,9 @@ TcsReturnCode tcs_pool_create(struct TcsPool** pool)
     if (*pool == NULL)
         return TCS_ERROR_MEMORY;
     memset(*pool, 0, sizeof(struct TcsPool)); // Just to be safe
-    TcsReturnCode sts_rfds = __tcs_fd_set_vector_create(&(*pool)->rfds);
-    TcsReturnCode sts_wfds = __tcs_fd_set_vector_create(&(*pool)->wfds);
-    TcsReturnCode sts_efds = __tcs_fd_set_vector_create(&(*pool)->efds);
+    int sts_read_array = ulist_soc_create(&(*pool)->read_sockets, 64);
+    int sts_write_array = ulist_soc_create(&(*pool)->write_sockets, 64);
+    int sts_error_array = ulist_soc_create(&(*pool)->error_sockets, 64);
 
     // TODO(markusl): Create a common vector structure
     (*pool)->user_data.key = malloc(sizeof(SOCKET) * TCS_POOL_CAPACITY_STEP);
@@ -585,7 +510,7 @@ TcsReturnCode tcs_pool_create(struct TcsPool** pool)
     if ((*pool)->user_data.key == NULL || (*pool)->user_data.value == NULL)
         sts_usrdata = TCS_ERROR_MEMORY;
 
-    if (sts_rfds != TCS_SUCCESS || sts_wfds != TCS_SUCCESS || sts_efds != TCS_SUCCESS)
+    if (sts_read_array != 0 || sts_write_array != TCS_SUCCESS || sts_error_array != TCS_SUCCESS)
     {
         tcs_pool_destory(pool);
         return TCS_ERROR_MEMORY;
@@ -599,9 +524,10 @@ TcsReturnCode tcs_pool_destory(struct TcsPool** pool)
         return TCS_ERROR_INVALID_ARGUMENT;
 
     // Free away!
-    free((*pool)->rfds.data);
-    free((*pool)->wfds.data);
-    free((*pool)->efds.data);
+    ulist_soc_destroy(&(*pool)->read_sockets);
+    ulist_soc_destroy(&(*pool)->write_sockets);
+    ulist_soc_destroy(&(*pool)->error_sockets);
+
     free((*pool)->user_data.key);
     free((*pool)->user_data.value);
     free(*pool);
@@ -647,27 +573,29 @@ TcsReturnCode tcs_pool_add(struct TcsPool* pool,
 
     if (poll_can_read)
     {
-        TcsReturnCode sts = __tcs_fd_set_vector_add(&pool->rfds, socket);
-        if (sts != TCS_SUCCESS)
-            return sts;
+        int sts = ulist_soc_add(&pool->read_sockets, socket);
+        if (sts != 0)
+        {
+            return TCS_ERROR_MEMORY;
+        }
     }
     if (poll_can_write)
     {
-        TcsReturnCode sts = __tcs_fd_set_vector_add(&pool->wfds, socket);
-        if (sts != TCS_SUCCESS)
+        int sts = ulist_soc_add(&pool->write_sockets, socket);
+        if (sts != 0)
         {
-            __tcs_fd_set_vector_remove(&pool->rfds, socket);
-            return sts;
+            ulist_soc_pop(&pool->read_sockets);
+            return TCS_ERROR_MEMORY;
         }
     }
     if (poll_error)
     {
-        TcsReturnCode sts = __tcs_fd_set_vector_add(&pool->efds, socket);
-        if (sts != TCS_SUCCESS)
+        int sts = ulist_soc_add(&pool->error_sockets, socket);
+        if (sts != 0)
         {
-            __tcs_fd_set_vector_remove(&pool->rfds, socket);
-            __tcs_fd_set_vector_remove(&pool->wfds, socket);
-            return sts;
+            ulist_soc_pop(&pool->read_sockets);
+            ulist_soc_pop(&pool->write_sockets);
+            return TCS_ERROR_MEMORY;
         }
     }
     return TCS_SUCCESS;
@@ -675,15 +603,39 @@ TcsReturnCode tcs_pool_add(struct TcsPool* pool,
 
 TcsReturnCode tcs_pool_remove(struct TcsPool* pool, TcsSocket socket)
 {
-    TcsReturnCode sts_rfds = __tcs_fd_set_vector_remove(&pool->rfds, socket);
-    if (sts_rfds != TCS_SUCCESS)
-        return sts_rfds;
-    TcsReturnCode sts_wfds = __tcs_fd_set_vector_remove(&pool->rfds, socket);
-    if (sts_wfds != TCS_SUCCESS)
-        return sts_wfds;
-    TcsReturnCode sts_efds = __tcs_fd_set_vector_remove(&pool->rfds, socket);
-    if (sts_efds != TCS_SUCCESS)
-        return sts_efds;
+    for (size_t i = 0; i < ulist_soc_count(&pool->read_sockets); ++i)
+    {
+        if (pool->read_sockets.data[i] == socket)
+        {
+            ulist_soc_remove(&pool->read_sockets, i);
+            break;
+        }
+    }
+    for (size_t i = 0; i < ulist_soc_count(&pool->write_sockets); ++i)
+    {
+        if (pool->write_sockets.data[i] == socket)
+        {
+            ulist_soc_remove(&pool->write_sockets, i);
+            break;
+        }
+    }
+    for (size_t i = 0; i < ulist_soc_count(&pool->error_sockets); ++i)
+    {
+        if (pool->error_sockets.data[i] == socket)
+        {
+            ulist_soc_remove(&pool->error_sockets, i);
+            break;
+        }
+    }
+    for (size_t i = 0; i < pool->user_data.count; ++i)
+    {
+        if (pool->user_data.key[i] == socket)
+        {
+            pool->user_data.count--;
+            pool->user_data.key[i] = pool->user_data.key[pool->user_data.count];
+            pool->user_data.value[i] = pool->user_data.value[pool->user_data.count];
+        }
+    }
 
     return TCS_SUCCESS;
 }
@@ -704,9 +656,10 @@ TcsReturnCode tcs_pool_poll(struct TcsPool* pool,
     // Allocate so that we can access fd_array out of nominel bounds
     // We need this hack to be able to use dynamic memory for select
     const size_t data_offset = offsetof(struct tcs_fd_set, fd_array);
-    struct tcs_fd_set* rfds_cpy = malloc(data_offset + sizeof(SOCKET) * pool->rfds.count);
-    struct tcs_fd_set* wfds_cpy = malloc(data_offset + sizeof(SOCKET) * pool->wfds.count);
-    struct tcs_fd_set* efds_cpy = malloc(data_offset + sizeof(SOCKET) * pool->efds.count);
+
+    struct tcs_fd_set* rfds_cpy = malloc(data_offset + sizeof(SOCKET) * ulist_soc_count(&pool->read_sockets));
+    struct tcs_fd_set* wfds_cpy = malloc(data_offset + sizeof(SOCKET) * ulist_soc_count(&pool->write_sockets));
+    struct tcs_fd_set* efds_cpy = malloc(data_offset + sizeof(SOCKET) * ulist_soc_count(&pool->error_sockets));
     if (rfds_cpy == NULL || wfds_cpy == NULL || efds_cpy == NULL)
     {
         free(rfds_cpy);
@@ -715,13 +668,13 @@ TcsReturnCode tcs_pool_poll(struct TcsPool* pool,
 
         return TCS_ERROR_MEMORY;
     }
-    rfds_cpy->fd_count = (u_int)pool->rfds.count;
-    wfds_cpy->fd_count = (u_int)pool->wfds.count;
-    efds_cpy->fd_count = (u_int)pool->efds.count;
+    rfds_cpy->fd_count = (u_int)ulist_soc_count(&pool->read_sockets);
+    wfds_cpy->fd_count = (u_int)ulist_soc_count(&pool->write_sockets);
+    efds_cpy->fd_count = (u_int)ulist_soc_count(&pool->error_sockets);
 
-    memcpy(rfds_cpy->fd_array, pool->rfds.data, sizeof(SOCKET) * pool->rfds.count);
-    memcpy(wfds_cpy->fd_array, pool->wfds.data, sizeof(SOCKET) * pool->wfds.count);
-    memcpy(efds_cpy->fd_array, pool->efds.data, sizeof(SOCKET) * pool->efds.count);
+    memcpy(rfds_cpy->fd_array, pool->read_sockets.data, sizeof(SOCKET) * ulist_soc_count(&pool->read_sockets));
+    memcpy(wfds_cpy->fd_array, pool->write_sockets.data, sizeof(SOCKET) * ulist_soc_count(&pool->write_sockets));
+    memcpy(efds_cpy->fd_array, pool->error_sockets.data, sizeof(SOCKET) * ulist_soc_count(&pool->error_sockets));
 
     // Run select
     struct timeval* t_ptr = NULL;
