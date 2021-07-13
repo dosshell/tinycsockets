@@ -48,7 +48,12 @@ static int ulist_reserve(struct UListBase* ulist, size_t capacity_bytes)
     return 0;
 }
 
-static int ulist_add(struct UListBase* ulist, void* data, size_t element_size)
+//static int ulist_add(struct UListBase* ulist, void* data, size_t count, size_t element_size)
+//{
+//    return 0;
+//}
+
+static int ulist_add_one(struct UListBase* ulist, void* data, size_t element_size)
 {
     if (ulist->capacity_bytes <= ulist->used_bytes + element_size)
     {
@@ -68,7 +73,7 @@ static size_t ulist_count(struct UListBase* ulist, size_t element_size)
     return ulist->used_bytes / element_size;
 }
 
-static int ulist_remove(struct UListBase* ulist, size_t index, size_t element_size)
+static int ulist_remove_one(struct UListBase* ulist, size_t index, size_t element_size)
 {
     void* dst = ulist->data + index * element_size;
     size_t count = ulist->used_bytes / element_size;
@@ -102,6 +107,7 @@ static int ulist_pop(struct UListBase* list, size_t element_size)
     {
         list->used_bytes -= element_size;
         list->count--;
+        return 0;
     }
     else
     {
@@ -145,17 +151,17 @@ static inline int ulist_soc_destroy(UList_soc* ulist)
 {
     return ulist_destroy(&ulist->_base);
 }
-static inline int ulist_soc_add(UList_soc* ulist, SOCKET data)
+static inline int ulist_soc_add_one(UList_soc* ulist, SOCKET data)
 {
-    return ulist_add(&ulist->_base, (void*)&data, sizeof(SOCKET));
+    return ulist_add_one(&ulist->_base, (void*)&data, sizeof(SOCKET));
 }
-static inline int ulist_soc_add_ptr(UList_soc* ulist, SOCKET* data)
+//static inline int ulist_soc_add(UList_soc* ulist, SOCKET* data, size_t count)
+//{
+//    return ulist_add(&ulist->_base, (void*)data, count, sizeof(SOCKET));
+//}
+static inline int ulist_soc_remove_one(UList_soc* ulist, size_t index)
 {
-    return ulist_add(&ulist->_base, (void*)data, sizeof(SOCKET));
-}
-static inline int ulist_soc_remove(UList_soc* ulist, size_t index)
-{
-    return ulist_remove(&ulist->_base, index, sizeof(SOCKET));
+    return ulist_remove_one(&ulist->_base, index, sizeof(SOCKET));
 }
 static inline int ulist_soc_pop(UList_soc* list)
 {

@@ -81,7 +81,7 @@ struct tcs_usr_data_vector
 {
     SOCKET* key;
     void** value;
-    size_t capacity;
+    size_t capacity_bytes;
     size_t count;
 };
 
@@ -505,7 +505,7 @@ TcsReturnCode tcs_pool_create(struct TcsPool** pool)
     (*pool)->user_data.key = malloc(sizeof(SOCKET) * TCS_POOL_CAPACITY_STEP);
     (*pool)->user_data.value = malloc(sizeof(void*) * TCS_POOL_CAPACITY_STEP);
     (*pool)->user_data.count = 0;
-    (*pool)->user_data.capacity = TCS_POOL_CAPACITY_STEP;
+    (*pool)->user_data.capacity_bytes = TCS_POOL_CAPACITY_STEP;
     TcsReturnCode sts_usrdata = TCS_SUCCESS;
     if ((*pool)->user_data.key == NULL || (*pool)->user_data.value == NULL)
         sts_usrdata = TCS_ERROR_MEMORY;
@@ -548,9 +548,9 @@ TcsReturnCode tcs_pool_add(struct TcsPool* pool,
     if (!poll_can_read && !poll_can_write && !poll_error)
         return TCS_ERROR_INVALID_ARGUMENT;
 
-    if (pool->user_data.count == pool->user_data.capacity)
+    if (pool->user_data.count == pool->user_data.capacity_bytes)
     {
-        size_t new_capacity = pool->user_data.capacity + TCS_POOL_CAPACITY_STEP;
+        size_t new_capacity = pool->user_data.capacity_bytes + TCS_POOL_CAPACITY_STEP;
         SOCKET* new_key = realloc(pool->user_data.key, sizeof(SOCKET) * new_capacity);
         if (new_key == NULL)
             return TCS_ERROR_MEMORY;
@@ -559,13 +559,13 @@ TcsReturnCode tcs_pool_add(struct TcsPool* pool,
         void** new_value = realloc(pool->user_data.value, sizeof(SOCKET) * new_capacity);
         if (new_value == NULL)
         {
-            new_key = realloc(pool->user_data.key, sizeof(SOCKET) * pool->user_data.capacity);
+            new_key = realloc(pool->user_data.key, sizeof(SOCKET) * pool->user_data.capacity_bytes);
             if (new_key != NULL)
                 pool->user_data.key = new_key;
             return TCS_ERROR_MEMORY;
         }
         pool->user_data.value = new_value;
-        pool->user_data.capacity = new_capacity;
+        pool->user_data.capacity_bytes = new_capacity;
     }
     pool->user_data.key[pool->user_data.count] = socket;
     pool->user_data.value[pool->user_data.count] = user_data;
@@ -573,7 +573,7 @@ TcsReturnCode tcs_pool_add(struct TcsPool* pool,
 
     if (poll_can_read)
     {
-        int sts = ulist_soc_add(&pool->read_sockets, socket);
+        int sts = ulist_soc_add_one(&pool->read_sockets, socket);
         if (sts != 0)
         {
             return TCS_ERROR_MEMORY;
@@ -581,7 +581,7 @@ TcsReturnCode tcs_pool_add(struct TcsPool* pool,
     }
     if (poll_can_write)
     {
-        int sts = ulist_soc_add(&pool->write_sockets, socket);
+        int sts = ulist_soc_add_one(&pool->write_sockets, socket);
         if (sts != 0)
         {
             ulist_soc_pop(&pool->read_sockets);
@@ -590,7 +590,7 @@ TcsReturnCode tcs_pool_add(struct TcsPool* pool,
     }
     if (poll_error)
     {
-        int sts = ulist_soc_add(&pool->error_sockets, socket);
+        int sts = ulist_soc_add_one(&pool->error_sockets, socket);
         if (sts != 0)
         {
             ulist_soc_pop(&pool->read_sockets);
@@ -607,7 +607,7 @@ TcsReturnCode tcs_pool_remove(struct TcsPool* pool, TcsSocket socket)
     {
         if (pool->read_sockets.data[i] == socket)
         {
-            ulist_soc_remove(&pool->read_sockets, i);
+            ulist_soc_remove_one(&pool->read_sockets, i);
             break;
         }
     }
@@ -615,7 +615,7 @@ TcsReturnCode tcs_pool_remove(struct TcsPool* pool, TcsSocket socket)
     {
         if (pool->write_sockets.data[i] == socket)
         {
-            ulist_soc_remove(&pool->write_sockets, i);
+            ulist_soc_remove_one(&pool->write_sockets, i);
             break;
         }
     }
@@ -623,7 +623,7 @@ TcsReturnCode tcs_pool_remove(struct TcsPool* pool, TcsSocket socket)
     {
         if (pool->error_sockets.data[i] == socket)
         {
-            ulist_soc_remove(&pool->error_sockets, i);
+            ulist_soc_remove_one(&pool->error_sockets, i);
             break;
         }
     }
@@ -774,12 +774,12 @@ TcsReturnCode tcs_pool_poll(struct TcsPool* pool,
                 events_added++;
             }
         }
-        bool is_minimum = pool->user_data.capacity == TCS_POOL_CAPACITY_STEP;
+        bool is_minimum = pool->user_data.capacity_bytes == TCS_POOL_CAPACITY_STEP;
         bool should_shrink =
-            pool->user_data.capacity >= pool->user_data.count + 2 * TCS_POOL_CAPACITY_STEP; // hysteresis
+            pool->user_data.capacity_bytes >= pool->user_data.count + 2 * TCS_POOL_CAPACITY_STEP; // hysteresis
         if (!is_minimum && should_shrink)
         {
-            size_t new_capacity = pool->user_data.capacity - 2 * TCS_POOL_CAPACITY_STEP;
+            size_t new_capacity = pool->user_data.capacity_bytes - 2 * TCS_POOL_CAPACITY_STEP;
             TcsSocket* new_key = realloc(pool->user_data.key, new_capacity);
             if (new_key == NULL)
                 return TCS_ERROR_MEMORY; // Should not happen since we are shrinking
@@ -789,13 +789,13 @@ TcsReturnCode tcs_pool_poll(struct TcsPool* pool,
             void** new_value = realloc(pool->user_data.value, new_capacity);
             if (new_value == NULL)
             {
-                new_key = realloc(pool->user_data.key, pool->user_data.capacity);
+                new_key = realloc(pool->user_data.key, pool->user_data.capacity_bytes);
                 if (new_key != NULL) // Should not happen since we are shrinking
                     pool->user_data.key = new_key;
                 return TCS_ERROR_MEMORY;
             }
 
-            pool->user_data.capacity = new_capacity;
+            pool->user_data.capacity_bytes = new_capacity;
             pool->user_data.value = new_value;
             pool->user_data.key = new_key;
         }
