@@ -21,7 +21,7 @@
  */
 
 #include "tinycsocket.h"
-#include "tinyulist.h"
+#include "tinydatastructures.h"
 
 #ifdef TINYCSOCKET_USE_WIN32_IMPL
 
@@ -497,9 +497,9 @@ TcsReturnCode tcs_pool_create(struct TcsPool** pool)
     if (*pool == NULL)
         return TCS_ERROR_MEMORY;
     memset(*pool, 0, sizeof(struct TcsPool)); // Just to be safe
-    int sts_read_array = ulist_soc_create(&(*pool)->read_sockets, 64);
-    int sts_write_array = ulist_soc_create(&(*pool)->write_sockets, 64);
-    int sts_error_array = ulist_soc_create(&(*pool)->error_sockets, 64);
+    int sts_read_array = tds_ulist_soc_create(&(*pool)->read_sockets, 64);
+    int sts_write_array = tds_ulist_soc_create(&(*pool)->write_sockets, 64);
+    int sts_error_array = tds_ulist_soc_create(&(*pool)->error_sockets, 64);
 
     // TODO(markusl): Create a common vector structure
     (*pool)->user_data.key = malloc(sizeof(SOCKET) * TCS_POOL_CAPACITY_STEP);
@@ -524,9 +524,9 @@ TcsReturnCode tcs_pool_destory(struct TcsPool** pool)
         return TCS_ERROR_INVALID_ARGUMENT;
 
     // Free away!
-    ulist_soc_destroy(&(*pool)->read_sockets);
-    ulist_soc_destroy(&(*pool)->write_sockets);
-    ulist_soc_destroy(&(*pool)->error_sockets);
+    tds_ulist_soc_destroy(&(*pool)->read_sockets);
+    tds_ulist_soc_destroy(&(*pool)->write_sockets);
+    tds_ulist_soc_destroy(&(*pool)->error_sockets);
 
     free((*pool)->user_data.key);
     free((*pool)->user_data.value);
@@ -573,7 +573,7 @@ TcsReturnCode tcs_pool_add(struct TcsPool* pool,
 
     if (poll_can_read)
     {
-        int sts = ulist_soc_add_one(&pool->read_sockets, socket);
+        int sts = tds_ulist_soc_add_one(&pool->read_sockets, socket);
         if (sts != 0)
         {
             return TCS_ERROR_MEMORY;
@@ -581,20 +581,20 @@ TcsReturnCode tcs_pool_add(struct TcsPool* pool,
     }
     if (poll_can_write)
     {
-        int sts = ulist_soc_add_one(&pool->write_sockets, socket);
+        int sts = tds_ulist_soc_add_one(&pool->write_sockets, socket);
         if (sts != 0)
         {
-            ulist_soc_pop(&pool->read_sockets);
+            tds_ulist_soc_pop(&pool->read_sockets);
             return TCS_ERROR_MEMORY;
         }
     }
     if (poll_error)
     {
-        int sts = ulist_soc_add_one(&pool->error_sockets, socket);
+        int sts = tds_ulist_soc_add_one(&pool->error_sockets, socket);
         if (sts != 0)
         {
-            ulist_soc_pop(&pool->read_sockets);
-            ulist_soc_pop(&pool->write_sockets);
+            tds_ulist_soc_pop(&pool->read_sockets);
+            tds_ulist_soc_pop(&pool->write_sockets);
             return TCS_ERROR_MEMORY;
         }
     }
@@ -603,27 +603,27 @@ TcsReturnCode tcs_pool_add(struct TcsPool* pool,
 
 TcsReturnCode tcs_pool_remove(struct TcsPool* pool, TcsSocket socket)
 {
-    for (size_t i = 0; i < ulist_soc_count(&pool->read_sockets); ++i)
+    for (size_t i = 0; i < pool->read_sockets.count; ++i)
     {
         if (pool->read_sockets.data[i] == socket)
         {
-            ulist_soc_remove_one(&pool->read_sockets, i);
+            tds_ulist_soc_remove_one(&pool->read_sockets, i);
             break;
         }
     }
-    for (size_t i = 0; i < ulist_soc_count(&pool->write_sockets); ++i)
+    for (size_t i = 0; i < pool->write_sockets.count; ++i)
     {
         if (pool->write_sockets.data[i] == socket)
         {
-            ulist_soc_remove_one(&pool->write_sockets, i);
+            tds_ulist_soc_remove_one(&pool->write_sockets, i);
             break;
         }
     }
-    for (size_t i = 0; i < ulist_soc_count(&pool->error_sockets); ++i)
+    for (size_t i = 0; i < pool->error_sockets.count; ++i)
     {
         if (pool->error_sockets.data[i] == socket)
         {
-            ulist_soc_remove_one(&pool->error_sockets, i);
+            tds_ulist_soc_remove_one(&pool->error_sockets, i);
             break;
         }
     }
@@ -657,9 +657,9 @@ TcsReturnCode tcs_pool_poll(struct TcsPool* pool,
     // We need this hack to be able to use dynamic memory for select
     const size_t data_offset = offsetof(struct tcs_fd_set, fd_array);
 
-    struct tcs_fd_set* rfds_cpy = malloc(data_offset + sizeof(SOCKET) * ulist_soc_count(&pool->read_sockets));
-    struct tcs_fd_set* wfds_cpy = malloc(data_offset + sizeof(SOCKET) * ulist_soc_count(&pool->write_sockets));
-    struct tcs_fd_set* efds_cpy = malloc(data_offset + sizeof(SOCKET) * ulist_soc_count(&pool->error_sockets));
+    struct tcs_fd_set* rfds_cpy = malloc(data_offset + sizeof(SOCKET) * pool->read_sockets.count);
+    struct tcs_fd_set* wfds_cpy = malloc(data_offset + sizeof(SOCKET) * pool->write_sockets.count);
+    struct tcs_fd_set* efds_cpy = malloc(data_offset + sizeof(SOCKET) * pool->error_sockets.count);
     if (rfds_cpy == NULL || wfds_cpy == NULL || efds_cpy == NULL)
     {
         free(rfds_cpy);
@@ -668,13 +668,13 @@ TcsReturnCode tcs_pool_poll(struct TcsPool* pool,
 
         return TCS_ERROR_MEMORY;
     }
-    rfds_cpy->fd_count = (u_int)ulist_soc_count(&pool->read_sockets);
-    wfds_cpy->fd_count = (u_int)ulist_soc_count(&pool->write_sockets);
-    efds_cpy->fd_count = (u_int)ulist_soc_count(&pool->error_sockets);
+    rfds_cpy->fd_count = (u_int)pool->read_sockets.count;
+    wfds_cpy->fd_count = (u_int)pool->write_sockets.count;
+    efds_cpy->fd_count = (u_int)pool->error_sockets.count;
 
-    memcpy(rfds_cpy->fd_array, pool->read_sockets.data, sizeof(SOCKET) * ulist_soc_count(&pool->read_sockets));
-    memcpy(wfds_cpy->fd_array, pool->write_sockets.data, sizeof(SOCKET) * ulist_soc_count(&pool->write_sockets));
-    memcpy(efds_cpy->fd_array, pool->error_sockets.data, sizeof(SOCKET) * ulist_soc_count(&pool->error_sockets));
+    memcpy(rfds_cpy->fd_array, pool->read_sockets.data, sizeof(SOCKET) * pool->read_sockets.count);
+    memcpy(wfds_cpy->fd_array, pool->write_sockets.data, sizeof(SOCKET) * pool->write_sockets.count);
+    memcpy(efds_cpy->fd_array, pool->error_sockets.data, sizeof(SOCKET) * pool->error_sockets.count);
 
     // Run select
     struct timeval* t_ptr = NULL;
